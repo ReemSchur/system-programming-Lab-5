@@ -17,6 +17,8 @@ startup:
         dec     eax             ; skip program name
         shl     eax, 2          ; eax = 4 * (argc - 1) Push evry char* of argv for _start
 
+        push    0               ; Push NULL terminator for argv
+
 .loop1:
         cmp     eax, 0
         jl      .done_args
@@ -31,7 +33,13 @@ startup:
         push    ecx             ; Push argc for _start
 
         mov     ebx, [ebp+16]   ; Gets the function address from C
-        call    ebx             ; Jumps to  _start
+        jmp     ebx             ; Jumps to  _start
+
+        ; The following code is unreachable if _start calls sys_exit
+        ; If _start were a regular function, it would return here.
+        ; However, _start pops the top of the stack (thinking it's argc)
+        ; which would be the return address if we used 'call'.
+        ; So we MUST use 'jmp' to preserve the stack layout (argc at top).
 
         mov     [ebp-4], eax    ; Save return value
         popad                   ; Restore caller state (registers)

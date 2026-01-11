@@ -100,34 +100,60 @@ void load_phdr(Elf32_Phdr *phdr, int fd) {
         return;
     }
 
-    Elf32_Addr vaddr_page = phdr->p_vaddr & 0xfffff000;
-    Elf32_Off  offset_page = phdr->p_offset & 0xfffff000;
-    int pad = phdr->p_vaddr & 0xfff;
+    // 1. חישוב כתובות וגדלים
+    Elf32_Addr vaddr = phdr->p_vaddr;
+    Elf32_Addr vaddr_aligned = vaddr & 0xfffff000;
+    Elf32_Addr padding = vaddr & 0xfff;
+    Elf32_Addr filesz = phdr->p_filesz;
+    Elf32_Addr memsz = phdr->p_memsz;
     int prot = get_prot_flags(phdr->p_flags);
 
-    printf("Loading segment: VirtAddr=0x%08x, Size=0x%05x, Flags=%s\n",
-           phdr->p_vaddr, phdr->p_memsz, flag_str(phdr->p_flags));
+    // 2. מיפוי הקובץ לזיכרון (File Mapping)
+    void *map_start = mmap((void *)vaddr_aligned, filesz + padding, prot, 
+                           MAP_PRIVATE | MAP_FIXED, fd, phdr->p_offset & 0xfffff000);
 
-    void *segment_ptr = mmap((void *)vaddr_page,
-                             phdr->p_memsz + pad,
-                             prot,
-                             MAP_PRIVATE | MAP_FIXED,
-                             fd,
-                             offset_page);
-
-    if (segment_ptr == MAP_FAILED) {
-        perror("mmap failed");
+    if (map_start == MAP_FAILED) {
+        perror("mmap file failed");
         exit(1);
     }
+    
+    // הדפסת המידע כנדרש במשימה 2b
+    // (הערה: וודא שזה הפורמט הנדרש, אם צריך להשתמש ב-print_phdr המקורי תעשה זאת)
+    // printf("Mapped segment at %p\n", map_start); 
 
-    printf("Successfully mapped segment at 0x%08x\n", (unsigned int)segment_ptr);
+    // 3. טיפול ב-BSS (איפוס משתנים גלובליים)
+    if (memsz > filesz) {
+        Elf32_Addr file_end_vaddr = vaddr + filesz;
+        Elf32_Addr mem_end_vaddr = vaddr + memsz;
+        Elf32_Addr next_page = (file_end_vaddr + 0xfff) & 0xfffff000;
 
-    if (phdr->p_memsz > phdr->p_filesz) {
-        void *gap = (char *)phdr->p_vaddr + phdr->p_filesz;
-        memset(gap, 0, phdr->p_memsz - phdr->p_filesz);
+        // שלב א': איפוס השארית בדף הנוכחי
+        if (next_page > file_end_vaddr) {
+            size_t size_to_zero = (mem_end_vaddr < next_page) ? 
+                                  (mem_end_vaddr - file_end_vaddr) : 
+                                  (next_page - file_end_vaddr);
+            
+            if (!(prot & PROT_WRITE)) {
+                 mprotect((void*)(file_end_vaddr & 0xfffff000), 4096, prot | PROT_WRITE);
+            }
+            memset((void *)file_end_vaddr, 0, size_to_zero);
+            if (!(prot & PROT_WRITE)) {
+                 mprotect((void*)(file_end_vaddr & 0xfffff000), 4096, prot);
+            }
+        }
+
+        // שלב ב': הקצאת דפים חדשים (Anonymous) אם ה-BSS גולש לדף הבא
+        if (mem_end_vaddr > next_page) {
+            size_t size_alloc = mem_end_vaddr - next_page;
+            void *ptr = mmap((void *)next_page, size_alloc, prot, 
+                             MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            if (ptr == MAP_FAILED) {
+                perror("mmap anonymous failed");
+                exit(1);
+            }
+        }
     }
 }
-
 // Iterate over all program headers and call handler
 int foreach_phdr(void *map_start, void (*func)(Elf32_Phdr *, int), int arg) {
     Elf32_Ehdr *hdr = (Elf32_Ehdr *)map_start;
@@ -187,12 +213,12 @@ int main(int argc, char **argv) {
     }
 
     Elf32_Ehdr *hdr = (Elf32_Ehdr *)elf_data;
-    entry_point = (void *)hdr->e_entry;
+    Elf32_Addr entry_addr = hdr->e_entry;
 
     printf("=== ELF File Information ===\n");
     printf("Number of program headers: %d\n", hdr->e_phnum);
     printf("Program header offset: 0x%08x\n", hdr->e_phoff);
-    printf("Entry point: 0x%08x\n\n", hdr->e_entry);
+    printf("Entry point: 0x%08x\n\n", entry_addr);
 
     printf("=== Program Headers ===\n");
     foreach_phdr(elf_data, print_phdr_detailed, fd_in);
@@ -205,11 +231,11 @@ int main(int argc, char **argv) {
     munmap(elf_data, size);
 
     printf("=== Transferring Control ===\n");
-    printf("Jumping to entry point: 0x%08x\n", (unsigned int)entry_point);
+    printf("Jumping to entry point: 0x%08x\n", (unsigned int)entry_addr);
 
     int child_argc = argc - 1;
     char **child_argv = &argv[1];
-    startup(child_argc, child_argv, (void (*)(void))entry_point);
+    startup(child_argc, child_argv, (void (*)(void))entry_addr);
 
     unreachable();
     close(fd_in);
